@@ -362,4 +362,171 @@ CNN 텍스트 유사도 분석 모델이란?
 
 1. 기준 문장과 대상 문장에 대해서 인덱싱을 거쳐 문자열 형태의 문장을 인덱스 벡터 형태로 구성
 2. 인덱스 벡터는 임베딩 과정으로 임베딩 벡터로 바뀐 행렬로 구성
-3. 임베딩 과정을 통해 나온 문장 행렬은 기준 문장과 대상 문장 각각에 해당하는 CNN 블록을 거침
+3. 임베딩 과정을 통해 나온 문장 행렬은 기준 문장과 대상 문장 각각에 해당하는 CNN 블록(합성 곱 층 + 맥스 풀링) 을 거침
+4. 임베딩 블록, cnn 블록을 거친 벡터는 문장에 대한 의미 벡터
+5. 두 문장에 대한 의미 벡터를 가지고 여러 방식으로 유사도 구할 수 있음.
+
+--> 이번에는 완전연결 층을 거친 후 최종적으로 로지스틱 회귀 방법을 통해 문장 유사도 점수를 측정할 것
+
+
+-------
+## CNN 모델 구현
+
+1. library import
+~~~
+import tensorflow as tf
+import pandas as pd
+import numpy as np
+import os
+
+from sklearn.model_selection import train_test_split
+
+import json
+~~~
+
+> 모델 구현 : tensorflow + numpy
+> 단어 사전 정보 가져오기 : json
+> 데이터를 학습/검증으로 나누기 위해 : sklearn
+
+2. 데이터 가져오기 
+
+~~~
+TEST_Q1_DATA_FILE = 'test_q1.npy'
+TEST_Q2_DATA_FILE = 'test_q2.npy'
+TEST_ID_DATA_FILE = 'test_id.npy'
+~~~
+> train_q1 : 기준 문장
+> train_q1 : 기준 문장과 비교할 대상의 문장
+> test_id : 라벨 값과 데이터의 단어 사전과 단어 사전의 크기값을 가지고 있는 데이터
+
+3. 학습 데이터와 검증 데이터 나누기 
+
+~~~
+X = np.stack((q1_data, q2_data), axis=1)
+y = labels
+train_X, eval_X, train_y, eval_y = train_test_split(X, y, test_size=TEST_SPLIT, random_state=RNG_SEED)
+
+train_Q1 = train_X[:,0]
+train_Q2 = train_X[:,1]
+eval_Q1 = eval_X[:,0]
+eval_Q2 = eval_X[:,1]
+~~~
+
+X = np.stack((q1_data, q2_data), axis=1) : 두개의 데이터를 하나로 합친 뒤 사용, 공평하게 처리하기 위해서
+
+4. 다시 두 질문으로 나누기
+~~~
+def rearrange(base, hypothesis, label):
+    features = {"x1": base, "x2": hypothesis}
+    return features, label
+
+def train_input_fn():
+    dataset = tf.data.Dataset.from_tensor_slices((train_Q1, train_Q2, train_y))
+    dataset = dataset.shuffle(buffer_size=10000)
+    dataset = dataset.batch(BATCH_SIZE)
+    dataset = dataset.map(rearrange)
+    dataset = dataset.repeat(EPOCH)
+    iterator = dataset.make_one_shot_iterator()
+    
+    return iterator.get_next()
+
+def eval_input_fn():
+    dataset = tf.data.Dataset.from_tensor_slices((eval_Q1, eval_Q2, eval_y))
+    dataset = dataset.shuffle(buffer_size=10000)
+    dataset = dataset.batch(BATCH_SIZE)
+    dataset = dataset.map(rearrange)
+    iterator = dataset.make_one_shot_iterator()
+    
+    return iterator.get_next()
+~~~
+
+> rearrange : parameter - (기준 질문, 대상 질문, 라벨), 인자값을 통해 두 개의 질문을 하나의 딕셔너리 형태로 만들어 return 
+> train_input_fn : 학습을 위한 입력함수
+> eval_input_fn : 검증을 위한 입력 함수
+
+------
+## CNN 모델 구현
+1. CNN 블록
+~~~
+def basic_conv_sementic_network(inputs, name): # 문장에 대한 의미벡터를 만드는 과정
+    conv_layer = tf.keras.layers.Conv1D(CONV_FEATURE_DIM, 
+                                        CONV_WINDOW_SIZE, 
+                                        activation=tf.nn.relu, 
+                                        name=name + 'conv_1d',
+                                        padding='same')(inputs)
+    
+    max_pool_layer = tf.keras.layers.MaxPool1D(MAX_SEQUENCE_LENGTH, 
+                                               1)(conv_layer)
+
+    output_layer = tf.keras.layers.Dense(CONV_OUTPUT_DIM, 
+                                         activation=tf.nn.relu,
+                                         name=name + 'dense')(max_pool_layer)
+    output_layer = tf.squeeze(output_layer, 1)
+    
+    return output_layer
+~~~
+> 합성곱 계층 + 맥스 풀링 계층
+> (합성곱 계층 + 맥스 풀링 계층)을 통과한 후에는 차원을 바꾸기 위해 Dense 층 통과
+
+2. 모델 함수
+~~~
+def model_fn(features, labels, mode): 
+# parameter - 입력값, 라벨, 모델 함수가 사용된 모드
+
+    TRAIN = mode == tf.estimator.ModeKeys.TRAIN
+    EVAL = mode == tf.estimator.ModeKeys.EVAL
+    PREDICT = mode == tf.estimator.ModeKeys.PREDICT
+# 각 parameter를 어떤 상태인지 변수에 저장
+
+    embedding = tf.keras.layers.Embedding(VOCAB_SIZE,
+                                          WORD_EMBEDDING_DIM)
+    base_embedded_matrix = embedding(features['x1'])
+    hypothesis_embedded_matrix = embedding(features['x2'])
+# 임베딩 객체를 생성한 후 해당 객체를 사용해 기존 문장과 대상 문장을 임베딩 벡터로 만듦
+    
+    base_embedded_matrix = tf.keras.layers.Dropout(0.2)(base_embedded_matrix)
+    hypothesis_embedded_matrix = tf.keras.layers.Dropout(0.2)(hypothesis_embedded_matrix)  
+    base_sementic_matrix = basic_conv_sementic_network(base_embedded_matrix, 'base')
+    hypothesis_sementic_matrix = basic_conv_sementic_network(hypothesis_embedded_matrix, 'hypothesis')  
+# 임베딩된 값을 CNN블록에 적용
+# base : 기준 문장, hypothesis : 대상 문장
+
+    merged_matrix = tf.concat([base_sementic_matrix, hypothesis_sementic_matrix], -1)
+
+    similarity_dense_layer = tf.keras.layers.Dense(SIMILARITY_DENSE_FEATURE_DIM,
+                                             activation=tf.nn.relu)(merged_matrix)
+    
+    similarity_dense_layer = tf.keras.layers.Dropout(0.2)(similarity_dense_layer)    
+    logit_layer = tf.keras.layers.Dense(1)(similarity_dense_layer)
+    logit_layer = tf.squeeze(logit_layer, 1)
+    similarity = tf.nn.sigmoid(logit_layer)
+# 윗 단계에서 CNN 블록을 통과했으면 문장에 대한 의미 벡터를 만들었을 것
+# 그 벡터값을 가지고, 유사도 측정
+
+    if PREDICT:
+        return tf.estimator.EstimatorSpec(
+                  mode=mode,
+                  predictions={
+                      'is_duplicate':similarity
+                  })
+    
+    loss = tf.losses.sigmoid_cross_entropy(labels, logit_layer)
+
+    if EVAL:
+        accuracy = tf.metrics.accuracy(labels, tf.round(similarity))
+        return tf.estimator.EstimatorSpec(
+                  mode=mode,
+                  eval_metric_ops= {'acc': accuracy},
+                  loss=loss)
+    
+    if TRAIN:
+        global_step = tf.train.get_global_step()
+        train_op = tf.train.AdamOptimizer(1e-3).minimize(loss, global_step)
+
+        return tf.estimator.EstimatorSpec(
+                  mode=mode,
+                  train_op=train_op,
+                  loss=loss)
+~~~
+> model_fn(features, labels, mode) : parameter - 입력값, 라벨, 모델 함수가 사용된 모드
+각각, 모드가 어떤 상태인지 할당
