@@ -254,3 +254,112 @@ labels = np.array(train_data['is_duplicate'], dtype=int)
 > TRAIN_Q2_DATA : 한 row에 있는 질문 2에 대해 인덱스 화 시킨 것
 > TRAIN_LABEL_DATA : is_duplicate이라는 column을 따로 뽑아낸 것, target data일듯
 
+### 현재는 train data를 정제하였음. test data도 위의 과정처럼 정제하는 단계 필요
+
+-------
+
+## 모델링
+### 1. XG 부스트 모델
+XG 부스트란? 'eXtream Gradient Boosting
+- 앙상블의 한 방법인 부스팅 기법을 사용
+
+앙상블 기법이란? 여러 개의 학습 알고리즘을 사용해서 더 좋은 성능을 얻는 방법
+1. 배깅 : 여러 개의 학습 알고리즘, 모델을 통해 각각 결과를 예측하고 모든 결과를 동등하게 보고 취합해서 결과를 얻는 방식
+2. 부스팅 : 배깅은 여러 알고리즘의 결과를 다 동일하게 취합한다면, 부스팅은 각 결과를 순차적으로 취합하는데 모델이 학습 후 잘못 예측한 부분에 가중치를 줘서 다시 모델로 가서 학습하는 방식
+
+![image](https://user-images.githubusercontent.com/37536415/65016967-84d2b500-d960-11e9-8fb4-2aac0ae6bd42.png)
+- 싱글은 앙상블 기법이 아니라 단순히 하나의 모델만으로 결과를 내는 방법
+
+#### XG 부스트 - 트리 부스팅
+- 랜덤 포레스트 모델이란 여러 개의 decision tree를 사용해 결과를 평균 내는 방법 : 배깅
+- 트리 부스팅 : 여러 개의 decision tree를 사용하지만 단순히 결과를 평균 내는 것이 아니라 결과를 보고 오답에 대해 가중치 부여, 
+<br>가중치가 부여된 오답에 대해서는 관심을 가지고 정답이 될 수 있도록 결과를 만들고 해당 결과에 대한 다른 오답을 찾아 다시 똑같은 작업을 반복적으로 진행
+
+> **XG boost : 트리 부스팅 방식에 경사 하강법을 통해 최적화하는 방법**
+> 연산량을 줄이기 위해 의사결정 트리를 구성할 때 병렬 처리를 사용해 빠른 시간에 학습 가능
+
+-------
+## XG 부스트 모델 구현
+
+
+1. 데이터 가져오기
+~~~
+train_q1_data = np.load(open(DATA_IN_PATH + TRAIN_Q1_DATA_FILE, 'rb'))
+train_q2_data = np.load(open(DATA_IN_PATH + TRAIN_Q2_DATA_FILE, 'rb'))
+train_labels = np.load(open(DATA_IN_PATH + TRAIN_LABEL_DATA_FILE, 'rb'))
+~~~
+위에 저장해 놓은 q1, q2, label을 각각 가져옴
+
+<br>
+
+~~~
+train_input = np.stack((train_q1_data, train_q2_data), axis=1) 
+~~~
+
+- stack을 활용해여 두 질문을 하나의 쌍으로 만들어줌.([[A 질문], [B 질문]])
+
+<br>
+
+<검증 데이터 만들기 - test 데이터가 아닌, train 데이터로 만들기>
+~~~
+train_input, eval_input, train_label, eval_label = train_test_split(train_input, train_labels, test_size=0.2, random_state=4242)
+~~~
+> 20%를 검증 데이터로 사용
+
+2. xgboost 라이브러리 설치 및 사용하기
+
+~~~
+pip install xgboost
+~~~
+> 설치
+~~~
+train_data = xgb.DMatrix(train_input.sum(axis=1), label=train_label) # 학습 데이터 읽어 오기
+eval_data = xgb.DMatrix(eval_input.sum(axis=1), label=eval_label) # 평가 데이터 읽어 오기
+~~~
+> xgb 라이브러리의 데이터 형식 따르기 위해서 DMatrix 형태로 바꿔주기
+train_input.sum(axis=1) : train_input은 두 개의 데이터를 합쳐준 변수값이다. 두 질문을 하나로 합쳐준다.
+
+3. 모델 학습하기 
+~~~
+params = {} # 인자를 통해 XGB모델에 넣어 주자 
+params['objective'] = 'binary:logistic' # 로지스틱 예측을 통해서 
+params['eval_metric'] = 'rmse' # root mean square error를 사용  
+
+bst = xgb.train(params, train_data, num_boost_round = 1000, evals = data_list, early_stopping_rounds=10)
+~~~
+> 모델을 학습하기 전에 파라미터 옵션을 적어주기
+> params['objective'] = 'binary:logistic' : 목적함수
+> params['eval_metric'] = 'rmse' : 평가 지표
+> num_boost_round : 데이터를 반복하는 횟수
+> evals : data_list = [(train_data, 'train'), (eval_data, 'valid')] - 모델 검증시 사용할 데이터
+> early_stopping_rounds : overfitting을 방지하기 위해서 조기 종료, 만약 10 epoch동안 에러 값이 별로 줄어들지 않으면 학습을 조기에 종료
+
+![image](https://user-images.githubusercontent.com/37536415/65018710-b2b9f880-d964-11e9-9478-d8bc2eddacb6.png)
+> 657 부근에서 10개 정도가 거의 error가 바뀌지 않았기 때문에 early stopping이 됨.
+
+### predict
+~~~
+test_input = np.stack((test_q1_data, test_q2_data), axis=1) 
+test_data = xgb.DMatrix(test_input.sum(axis=1))
+test_predict = bst.predict(test_data)
+~~~
+> test data를 사용해서 예측하기 
+-----------
+### 2. CNN 모델
+- 두 개의 텍스트 문장으로 돼 있기 때문에 병렬적인 구조를 가진 모델을 만들어야 함.
+
+CNN 텍스트 유사도 분석 모델이란?
+
+<br>
+
+문장에 대한 의미 벡터를 합성곱 신경망을 통해 추출해서 그 벡터에 대한 유사도 측정
+
+
+![image](https://user-images.githubusercontent.com/37536415/65018787-dda44c80-d964-11e9-8057-82790a8cc758.png)
+> 모델에 입력하고자 하는 데이터 : 2개
+> 기준 문장 : 문장에 유사도를 보기 위해서는 기준이 되는 문장이 필요
+> 학습이 진행된 후, 문장의 의미를 파악할 수 있기 때문에 "I love deep learning", "deep nlp is awesome"이라는 문장의 유사도는 높음.
+
+1. 기준 문장과 대상 문장에 대해서 인덱싱을 거쳐 문자열 형태의 문장을 인덱스 벡터 형태로 구성
+2. 인덱스 벡터는 임베딩 과정으로 임베딩 벡터로 바뀐 행렬로 구성
+3. 임베딩 과정을 통해 나온 문장 행렬은 기준 문장과 대상 문장 각각에 해당하는 CNN 블록을 거침
