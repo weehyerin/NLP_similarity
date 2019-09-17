@@ -123,12 +123,12 @@ plt.axis('off')
 
 ![image](https://user-images.githubusercontent.com/37536415/64830764-37c3ab80-d60d-11e9-897c-f98c4f9063e6.png)
 
-질문 길이 최대 값: 1169
-질문 길이 평균 값: 59.82
-질문 길이 표준편차: 31.96
-질문 길이 중간 값: 51.0
-질문 길이 제 1 사분위: 39.0
-질문 길이 제 3 사분위: 72.0
+- 질문 길이 최대 값: 1169
+- 질문 길이 평균 값: 59.82
+- 질문 길이 표준편차: 31.96
+- 질문 길이 중간 값: 51.0
+- 질문 길이 제 1 사분위: 39.0
+- 질문 길이 제 3 사분위: 72.0
 
 #### 사용 단어 개수 세기
 1. 단어 쪼개기
@@ -138,11 +138,119 @@ train_word_counts = train_set.apply(lambda x:len(x.split(' ')))
 
 ![image](https://user-images.githubusercontent.com/37536415/64830831-8bce9000-d60d-11e9-81db-195d16b889f1.png)
 
-질문 단어 개수 최대 값: 237
-질문 단어 개수 평균 값: 11.06
-질문 단어 개수 표준편차: 5.89
-질문 단어 개수 중간 값: 10.0
-질문 단어 개수 제 1 사분위: 7.0
-질문 단어 개수 제 3 사분위: 13.0
-질문 단어 개수 99 퍼센트: 31.0
+- 질문 단어 개수 최대 값: 237
+- 질문 단어 개수 평균 값: 11.06
+- 질문 단어 개수 표준편차: 5.89
+- 질문 단어 개수 중간 값: 10.0
+- 질문 단어 개수 제 1 사분위: 7.0
+- 질문 단어 개수 제 3 사분위: 13.0
+- 질문 단어 개수 99 퍼센트: 31.0
+
+> 물음표가있는 질문: 99.87%
+> 수학 태그가있는 질문: 0.12%
+> 질문이 가득 찼을 때: 6.31%
+> 첫 글자가 대문자 인 질문: 99.81%
+> 대문자가있는 질문: 99.95%
+> 숫자가있는 질문: 11.83%
+
+전체적으로 질문들이 물음표와 대문자로 된 찻 문자를 가지고 있다. 
+- 모든 질문이 보편적으로 가지고 있는 특징 --> **질문의 보편적인 특징은 삭제**
++) 위에 설명) 라벨이 한 쪽으로 치우쳐져 있으므로(중복인지 아닌지) 양 맞춰주기
+
+----------
+
+## 데이터 전처리
+
+### 1. 라벨의 균형을 맞추기
+중복이 아닌 데이터의 개수가 많아서 줄이기
+
+1. loc function : 라벨이 1인 경우와 0인 경우를 분리하기
+2. 적은 데이터의 개수를 많은 데이터에 대한 비율을 계산
+3. 비율만큼 데이터 많은 것에 대해 샘플링
+~~~
+train_pos_data = train_data.loc[train_data['is_duplicate'] == 1]
+train_neg_data = train_data.loc[train_data['is_duplicate'] == 0]
+
+class_difference = len(train_neg_data) - len(train_pos_data)
+sample_frac = 1 - (class_difference / len(train_neg_data))
+
+train_neg_data = train_neg_data.sample(frac = sample_frac)
+# 비슷한 크기의 데이터를 다시 합치기
+train_data = pd.concat([train_neg_data, train_pos_data])
+~~~
+
+### 2. 특수문자 삭제, 대문자 -> 소문자 바꾸기
+
+~~~
+# 정규표현식으로 전처리하기 위해 re 라이브러리 사용
+# FILTERS : 물음표와 마침표를 포함해서 제거하고자 하는 기호의 집합
+change_filter = re.compile(FILTERS)
+
+# 질문을 리스트로 만듦
+questions1 = [str(s) for s in train_data['question1']]
+questions2 = [str(s) for s in train_data['question2']]
+
+# 전처리한 리스트를 담을 그릇
+filtered_questions1 = list()
+filtered_questions2 = list()
+
+# filter로 정의된 것(특수문자 지우기) 후, .lower()로 모두 소문자로 바꿔서 리스트에 저장
+for q in questions1:
+     filtered_questions1.append(re.sub(change_filter, "", q).lower())
+        
+for q in questions2:
+     filtered_questions2.append(re.sub(change_filter, "", q).lower())
+~~~
+
+## 3. tokenizing, 각 텍스트를 인덱스로 바꾸기, 문장 길이 맞추기
+
+### 3-1. tokenizing
+**한 row 당 두개의 질문이 있는데 그 두 개를 합쳐서 tokenizing**
+<br>이렇게 하는 이유 : 동일하게 tokenizing을 진행하고, 전체 단어 사전을 만들기 위해서
+
+~~~
+tokenizer = Tokenizer()
+tokenizer.fit_on_texts(filtered_questions1 + filtered_questions2)
+~~~
+
+### 3-2. 각 텍스트를 인덱스로 바꾸기
+
+~~~
+questions1_sequence = tokenizer.texts_to_sequences(filtered_questions1)
+questions2_sequence = tokenizer.texts_to_sequences(filtered_questions2)
+~~~
+![image](https://user-images.githubusercontent.com/37536415/65015506-b8abdb80-d95c-11e9-8eb8-b9b4b4179b53.png)
+> 단어 사전에 맞추어 텍스트를 인덱스화 됨.
+
+### 3-3. 최대 길이 정해서 조정해주기
+
+~~~
+q1_data = pad_sequences(questions1_sequence, maxlen=MAX_SEQUENCE_LENGTH, padding='post')
+q2_data = pad_sequences(questions2_sequence, maxlen=MAX_SEQUENCE_LENGTH, padding='post')
+~~~
+> 긴 길이의 텍스트는 잘라주고, 짧은 질문은 0으로 채워주기
+
+## 데이터 저장하기
+
+~~~
+TRAIN_Q1_DATA = 'train_q1.npy'
+TRAIN_Q2_DATA = 'train_q2.npy'
+TRAIN_LABEL_DATA = 'train_label.npy'
+DATA_CONFIGS = 'data_configs.json'
+
+np.save(open(DATA_IN_PATH + TRAIN_Q1_DATA, 'wb'), q1_data)
+np.save(open(DATA_IN_PATH + TRAIN_Q2_DATA , 'wb'), q2_data)
+np.save(open(DATA_IN_PATH + TRAIN_LABEL_DATA , 'wb'), labels)
+
+json.dump(data_configs, open(DATA_IN_PATH + DATA_CONFIGS, 'w'))
+~~~
+
+~~~
+labels = np.array(train_data['is_duplicate'], dtype=int)
+~~~
+
+<br><각 데이터 설명><br>
+> TRAIN_Q1_DATA : 한 row에 있는 질문 1에 대해 인덱스 화 시킨 것
+> TRAIN_Q2_DATA : 한 row에 있는 질문 2에 대해 인덱스 화 시킨 것
+> TRAIN_LABEL_DATA : is_duplicate이라는 column을 따로 뽑아낸 것, target data일듯
 
