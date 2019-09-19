@@ -509,8 +509,10 @@ def model_fn(features, labels, mode):
                   predictions={
                       'is_duplicate':similarity
                   })
-    
+    # 유사도 값을 딕셔너리 형태로 전달
+
     loss = tf.losses.sigmoid_cross_entropy(labels, logit_layer)
+    # 손실값 계산 -> logits 값(결과 값)과 라벨을 통해 손실값 계산, 이후 sigmoid 적용
 
     if EVAL:
         accuracy = tf.metrics.accuracy(labels, tf.round(similarity))
@@ -518,6 +520,7 @@ def model_fn(features, labels, mode):
                   mode=mode,
                   eval_metric_ops= {'acc': accuracy},
                   loss=loss)
+    # train data가 아닌, 검증 데이터) 정확도 리턴 + loss 값 return
     
     if TRAIN:
         global_step = tf.train.get_global_step()
@@ -527,6 +530,122 @@ def model_fn(features, labels, mode):
                   mode=mode,
                   train_op=train_op,
                   loss=loss)
+    # 학습 상태 리턴 : 가중치를 최적화 해야하므로, (AdamOptimizer)손실값 적용
 ~~~
-> model_fn(features, labels, mode) : parameter - 입력값, 라벨, 모델 함수가 사용된 모드
-각각, 모드가 어떤 상태인지 할당
+
+~~~
+est = tf.estimator.Estimator(model_fn, model_dir=model_dir)
+est.train(train_input_fn)
+~~~
+> 입력한 모델 함수를 Estimator로 입력 후 train
+
+~~~
+INFO:tensorflow:Loss for final step: 0.46720922.
+~~~
+> 최종 손실값을 나타내주고, 학습이 종료됨.
+
+~~~
+est.evaluate(eval_input_fn) #eval
+~~~
+> training한 후에 evaluate 하기
+
+-----------
+
+### 3. MaLSTM
+
+MaLSTM이란?
+- 순서가 있는 데이터에 적합
+- 순환 신경망(RNN)계 모델
+- 문장의 sequence 형태로 학습
+- **유사도를 구하기 위해 활용하는 대표적인 모델 : MaLSTM - Manhattan Distance + LSTM**
+
+![image](https://user-images.githubusercontent.com/37536415/65206661-21fd2d00-daca-11e9-9104-9faf5f30bc26.png)
+
+> 의미 벡터 : LSTM의 마지막 step인 (LSTM(a), h3) + (LSTM(b), h4) - 문장의 모든 단어에 대한 정보가 반영된 값으로 전체 문장을 대표하는 벡터
+> 두 벡터에 대해 맨하탄 거리를 계싼해서 유사도를 측정한 후, 실제 라벨과 비교해 학습
+
+~~~
+def Malstm(features, labels, mode):
+        
+    TRAIN = mode == tf.estimator.ModeKeys.TRAIN
+    EVAL = mode == tf.estimator.ModeKeys.EVAL
+    PREDICT = mode == tf.estimator.ModeKeys.PREDICT
+    
+    def basic_bilstm_network(inputs, name):
+        with tf.variable_scope(name, reuse=tf.AUTO_REUSE):
+            #NUM_LAYERS 수만큼 쌓기(fw : 전방, bw : 후방)
+            lstm_fw = [
+                tf.nn.rnn_cell.DropoutWrapper(tf.nn.rnn_cell.LSTMCell(HIDDEN),output_keep_prob=DROPOUT_RATIO)
+                for layer in range(NUM_LAYERS)
+            ]
+            lstm_bw = [
+                tf.nn.rnn_cell.DropoutWrapper(tf.nn.rnn_cell.LSTMCell(HIDDEN),output_keep_prob=DROPOUT_RATIO)
+                for layer in range(NUM_LAYERS)
+            ]
+            # 'MultiRNNCELL'을 통해 여러 층이 쌓인 LSTM을 묶는다.
+            multi_lstm_fw = tf.nn.rnn_cell.MultiRNNCell(lstm_fw)
+            multi_lstm_bw = tf.nn.rnn_cell.MultiRNNCell(lstm_bw)
+            
+            # 이후 "bidirectional_dynamic_rnn"기능을 통해 양방향 lstm 구현
+            (fw_outputs, bw_outputs), _ = tf.nn.bidirectional_dynamic_rnn(cell_fw = multi_lstm_fw,
+                                                       cell_bw = multi_lstm_bw,
+                                                       inputs = inputs,
+                                                       dtype = tf.float32)
+            outputs = tf.concat([fw_outputs, bw_outputs], 2)
+            
+            return outputs[:,-1,:]
+    embedding = tf.keras.layers.Embedding(VOCAB_SIZE, EMBEDDING_DIM)
+    
+    base_embedded_matrix = embedding(features['base'])
+    hypothesis_embedded_matrix = embedding(features['hypothesis'])
+    
+    base_sementic_matrix = basic_bilstm_network(base_embedded_matrix, 'base')
+    hypothesis_sementic_matrix = basic_bilstm_network(hypothesis_embedded_matrix, 'hypothesis')
+    
+    base_sementic_matrix = tf.keras.layers.Dropout(DROPOUT_RATIO)(base_sementic_matrix)
+    hypothesis_sementic_matrix = tf.keras.layers.Dropout(DROPOUT_RATIO)(hypothesis_sementic_matrix)
+    
+    logit_layer = tf.exp(-tf.reduce_sum(tf.abs(base_sementic_matrix - hypothesis_sementic_matrix), axis = 1, keepdims = True))
+    logit_layer = tf.squeeze(logit_layer, axis = -1)
+    
+    if PREDICT:
+        return tf.estimator.EstimatorSpec(
+                  mode=mode,
+                  predictions={
+                      'is_duplicate':logit_layer
+                  })
+        #prediction 진행 시, None
+    if labels is not None:
+        labels = tf.to_float(labels)
+        
+    loss = tf.losses.mean_squared_error(labels=labels, predictions=logit_layer)
+    
+    if EVAL:
+        accuracy = tf.metrics.accuracy(labels, tf.round(logit_layer))
+        eval_metric_ops = {'acc': accuracy}
+        return tf.estimator.EstimatorSpec(
+                  mode=mode,
+                  eval_metric_ops= eval_metric_ops,
+                  loss=loss)
+    elif TRAIN:
+
+        global_step = tf.train.get_global_step()
+        train_op = tf.train.AdamOptimizer(1e-3).minimize(loss, global_step)
+
+        return tf.estimator.EstimatorSpec(
+                  mode=mode,
+                  train_op=train_op,
+                  loss=loss)
+~~~
+
+> 총 4개의 layer를 쌓아 학습 - lstm의 성능을 높이기 위해서는 층이 깊으면 좋음
+
+##### 모델 설명
+1. 함수의 입력값을 임베딩 값으로 바꾸기 : 기준 문장과 대상 문장을 임베딩 된 벡터로 바꾼다.
+2. 양방향 lstm 사용 : 따라서 fw lstm, bw lstm 정의) 이후, 두 개를 합쳐주기(bidirectional_dynamic_rnn 사용)
+3. 양방향 lstm에서 얻을 수 있는 2개의 return 값 : lstm의 return 값, 마지막 은닉 상태 벡터값 --> 우리가 원하는 것은 의미 벡터를 위해 마지막 은닉 상태의 백터값을 원함. 
+    - 따라서 마지막 은닉 상태 벡터를 fw_outputs, bw_outputs에 저장
+    - `outputs = tf.concat([fw_outputs, bw_outputs], 2)`  : 두 개를 합쳐줌, lstm이 순방향, 역방향을 모두 학습함으로써 성능 개선에 도움
+4. 맨하탄 거리 구해서 스칼라 값으로 만들기
+
+유사도(맨하탄 거리)를 측정했으므로 학습 가능
